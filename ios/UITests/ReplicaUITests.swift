@@ -38,8 +38,7 @@ final class ReplicaUITests: XCTestCase {
     func test1_signInThenThePage() {
         let a = app(["-reset"])
         a.launch()
-        XCTAssertTrue(a.buttons["signin"].waitForExistence(timeout: 10))
-        sheetAlert("Continue")
+        sheetAlert("Continue")  // the sheet opens by itself; its system alert covers the app until answered
         let ok = a.webViews.staticTexts["stub ok"]
         XCTAssertTrue(ok.waitForExistence(timeout: 30), "the page after sign-in")
         XCTAssertTrue(a.webViews.staticTexts["cookie ok"].exists)
@@ -61,8 +60,7 @@ final class ReplicaUITests: XCTestCase {
     }
 
     func test3_spentToken() {
-        // the stub forgets nothing between tests, but a fresh stub run (the CI step restarts it) knows no token:
-        // restart it through its own URL is not possible, so this test uses a token the stub never minted
+        // a token the stub never minted, good until 2100 by its own exp: the stub sends the WebView to Access's login
         let a = app(["-reset", "-token", "x.eyJleHAiOjQxMDI0NDQ4MDB9.y"])
         a.launch()
         sheetAlert("Cancel")
