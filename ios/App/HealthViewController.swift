@@ -96,7 +96,14 @@ final class HealthViewController: UIViewController, WKNavigationDelegate, ASWebA
             stack.topAnchor.constraint(equalTo: signIn.topAnchor, constant: 32),
             button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
         ])
-        start()
+    }
+
+    private var started = false
+    /** the first start waits for the screen to be on display: the sign-in sheet needs the window to present from (from
+     * viewDidLoad it had none, and the app ended) */
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        if !started { started = true; start() }
     }
 
     /** a view filling the safe area: the page's window is exactly the space between the status bar and the home bar */
@@ -215,5 +222,7 @@ final class HealthViewController: UIViewController, WKNavigationDelegate, ASWebA
         return t.isEmpty ? nil : t
     }
 
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor { view.window! }
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        view.window ?? UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first ?? ASPresentationAnchor()
+    }
 }
