@@ -1,0 +1,109 @@
+# Builds YYC Systems on a GitHub macOS runner, walks every flow on an iPhone 17 simulator against stub/stub.py (the
+# phone replica: sign-in sheet, the page in the safe area with its cookie, the token kept, a spent token), then
+# archives UNSIGNED and lets the export cloud-sign with Apple's managed distribution certificate (App Store Connect
+# API key) and upload to TestFlight. A failing replica blocks the upload.
+name: ios
+on:
+  workflow_dispatch:
+    inputs:
+      upload: { description: "Upload to TestFlight", type: boolean, default: true }
+  push:
+    branches: [main]
+permissions: { contents: read }
+defaults:
+  run:
+    shell: bash -eo pipefail {0}
+    working-directory: ios
+jobs:
+  build:
+    runs-on: macos-26
+    concurrency: { group: ios, cancel-in-progress: false }
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode, xcodegen
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_*.app | grep -v -i beta | sort -V | tail -1)
+          echo "Using $XCODE"; sudo xcode-select -s "$XCODE"; xcodebuild -version
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          sed -i '' "s/BUILD_NUMBER: \"1\"/BUILD_NUMBER: \"$BUILD_NUMBER\"/" project.yml
+          xcodegen generate --quiet
+      - name: Phone replica (iPhone 17 simulator, every flow, against the stub)
+        timeout-minutes: 25
+        env:
+          DEVICE: ${{ 'iPhone 17' }}
+        run: |
+          python3 stub/stub.py 8765 & STUB=$!
+          UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import json,sys,re
+          d=json.load(sys.stdin)['devices']
+          rts=sorted((k for k in d if 'iOS' in k), key=lambda k:[int(x) for x in re.findall(r'\d+',k)])
+          for rt in reversed(rts):
+              for dev in d[rt]:
+                  if dev['name']==sys.argv[1]: print(dev['udid']); sys.exit()
+          " "$DEVICE")
+          [ -n "$UDID" ] || { echo "no $DEVICE simulator"; exit 1; }
+          xcrun simctl boot "$UDID" 2>/dev/null || true
+          xcrun simctl bootstatus "$UDID" -b > /dev/null
+          xcrun simctl status_bar "$UDID" override --time 9:41 --dataNetwork wifi --wifiBars 3 --cellularBars 4 --batteryState charged --batteryLevel 100 || true
+          mkdir -p "$RUNNER_TEMP/screens"
+          COMMON=(-project YYCSystems.xcodeproj -scheme YYCSystems -configuration Release -destination "id=$UDID"
+            -derivedDataPath DerivedData ONLY_ACTIVE_ARCH=YES ARCHS=arm64 CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO)
+          xcodebuild build-for-testing "${COMMON[@]}" > "$RUNNER_TEMP/build.log" 2>&1 || true
+          grep -E "error:|warning: .*HealthViewController|\*\* TEST BUILD" "$RUNNER_TEMP/build.log" | head -30 || true
+          xcrun simctl io "$UDID" recordVideo --codec=h264 --force "$RUNNER_TEMP/screens/replica.mp4" 2>/dev/null & RECORDER=$!
+          xcodebuild test-without-building "${COMMON[@]}" -resultBundlePath "$RUNNER_TEMP/ui.xcresult" \
+            -test-timeouts-enabled YES -maximum-test-execution-time-allowance 300 > "$RUNNER_TEMP/test.log" 2>&1 || true
+          kill -INT $RECORDER 2>/dev/null || true; wait $RECORDER 2>/dev/null || true
+          kill $STUB 2>/dev/null || true
+          grep -E "error:|\*\* TEST|Test Case .*(passed|failed)|XCTAssert|WINDOW |SAFE " "$RUNNER_TEMP/test.log" | head -40 || true
+          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/ui.xcresult" --output-path "$RUNNER_TEMP/att" >/dev/null 2>&1 || true
+          python3 - "$RUNNER_TEMP/att" "$RUNNER_TEMP/screens" <<'PY' || true
+          import json, os, shutil, sys
+          src, dst = sys.argv[1:]
+          n = 0
+          for t in json.load(open(os.path.join(src, "manifest.json"))):
+              for a in t.get("attachments", []):
+                  f = a.get("exportedFileName", "")
+                  if f.endswith(".png"):
+                      n += 1; shutil.copy(os.path.join(src, f), os.path.join(dst, "%02d-%s.png" % (n, a.get("suggestedHumanReadableName", f).split("_")[0])))
+          print(f"screenshots: {n}")
+          PY
+          { grep -E "error:|XCTAssert" "$RUNNER_TEMP/test.log" | head -5; grep -E "WINDOW |SAFE " "$RUNNER_TEMP/test.log" | head -2; } \
+            | while IFS= read -r l; do echo "::warning title=replica::${l:0:900}"; done || true
+          grep -qE "\*\* TEST (EXECUTE )?SUCCEEDED \*\*" "$RUNNER_TEMP/test.log"
+      - name: Keep the replica screenshots and log
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: replica-screens
+          path: |
+            ${{ runner.temp }}/screens/*.png
+            ${{ runner.temp }}/screens/replica.mp4
+            ${{ runner.temp }}/test.log
+            ${{ runner.temp }}/build.log
+          if-no-files-found: ignore
+      - name: Archive (unsigned)
+        if: inputs.upload || github.event_name == 'push'
+        run: |
+          xcodebuild archive -project YYCSystems.xcodeproj -scheme YYCSystems -configuration Release -destination 'generic/platform=iOS' \
+            -derivedDataPath DerivedData -archivePath "$RUNNER_TEMP/app.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" > "$RUNNER_TEMP/archive.log" 2>&1 || true
+          grep -E "error:|\*\* ARCHIVE" "$RUNNER_TEMP/archive.log" | head -40 || true
+          grep -q "ARCHIVE SUCCEEDED" "$RUNNER_TEMP/archive.log"
+      - name: Export, cloud-sign and upload to TestFlight
+        if: inputs.upload || github.event_name == 'push'
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          KEY="$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8"; printf '%s\n' "$ASC_PRIVATE_KEY" > "$KEY"; trap 'rm -f "$KEY"' EXIT
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/app.xcarchive" -exportOptionsPlist ExportOptions.plist \
+            -exportPath "$RUNNER_TEMP/export" -allowProvisioningUpdates -authenticationKeyPath "$KEY" \
+            -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" > "$RUNNER_TEMP/export.log" 2>&1 || true
+          grep -E "error|EXPORT|Upload|Uploaded|uploaded" "$RUNNER_TEMP/export.log" | sed "s#$RUNNER_TEMP/##" | tail -n 25 || true
+          grep -qE "EXPORT SUCCEEDED|Upload succeeded|Uploaded" "$RUNNER_TEMP/export.log"
