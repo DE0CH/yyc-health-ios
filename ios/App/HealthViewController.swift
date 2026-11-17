@@ -36,6 +36,7 @@ final class HealthViewController: UIViewController, WKNavigationDelegate, ASWebA
     private let button = UIButton(type: .system)
     private var session: ASWebAuthenticationSession?
     private var retry: Timer?
+    private var contextRetries = 0
 
     override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
 
@@ -99,10 +100,10 @@ final class HealthViewController: UIViewController, WKNavigationDelegate, ASWebA
     }
 
     private var started = false
-    /** the first start waits for the screen to be on display: the sign-in sheet needs the window to present from (from
-     * viewDidLoad it had none, and the app ended) */
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
+    /** the first start waits for the scene to be active: the sign-in sheet presents only from a window of a
+     * foreground-active scene (from viewDidLoad there was no window and the app ended; from viewDidAppear on a first
+     * launch the scene was not active yet: ASWebAuthenticationSession error 3, presentationContextInvalid) */
+    func becameActive() {
         if !started { started = true; start() }
     }
 
@@ -195,7 +196,13 @@ final class HealthViewController: UIViewController, WKNavigationDelegate, ASWebA
                 guard let self else { return }
                 self.session = nil
                 if let error {
-                    let cancelled = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
+                    let code = (error as? ASWebAuthenticationSessionError)?.code
+                    if code == .presentationContextInvalid, self.contextRetries < 5 {  // the scene not active yet: shortly again
+                        self.contextRetries += 1
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.startSignIn() }
+                        return
+                    }
+                    let cancelled = code == .canceledLogin
                     self.note.text = cancelled ? "Sign-in cancelled." : "Sign-in failed: \(error.localizedDescription)"
                     return
                 }

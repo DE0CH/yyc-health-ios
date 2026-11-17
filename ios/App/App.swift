@@ -19,4 +19,5 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneWillEnterForeground(_ scene: UIScene) { health.cameToForeground() }
+    func sceneDidBecomeActive(_ scene: UIScene) { health.becameActive() }
 }
